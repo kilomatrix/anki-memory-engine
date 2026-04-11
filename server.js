@@ -8,20 +8,7 @@ app.use(express.json());
  * 统一配置（Render 环境变量）
  */
 const PROVIDERS = {
-  openai: {
-    url: "https://api.openai.com/v1/chat/completions",
-    key: process.env.OPENAI_API_KEY,
-    model: "gpt-4o-mini",
-    headers: (key) => ({
-      "Authorization": `Bearer ${key}`,
-      "Content-Type": "application/json",
-    }),
-    body: (model, prompt) => ({
-      model,
-      messages: [{ role: "user", content: prompt }],
-      temperature: 0.7,
-    }),
-  },
+
 
   deepseek: {
     url: "https://api.deepseek.com/v1/chat/completions",
