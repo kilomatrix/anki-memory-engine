@@ -1,81 +1,89 @@
-console.log("🚀 BOOT: Server file loaded");
-
-const express = require("express");
-const cors = require("cors");
+import express from "express";
+import cors from "cors";
+import fetch from "node-fetch";
 
 const app = express();
+
+// ===== 基础中间件 =====
 app.use(cors());
 app.use(express.json());
 
-// ======================
-// ⚡ Render 必须：PORT绑定
-// ======================
-const PORT = process.env.PORT || 3000;
+// ===== 超时控制 =====
+const timeoutFetch = (url, options = {}, timeout = 8000) => {
+  return Promise.race([
+    fetch(url, options),
+    new Promise((_, reject) =>
+      setTimeout(() => reject(new Error("Timeout")), timeout)
+    )
+  ]);
+};
 
-// ======================
-// 💓 Heartbeat（防 Render 判定假死）
-// ======================
-setInterval(() => {
-  console.log("💓 alive:", new Date().toISOString());
-}, 20000);
-
-// ======================
-// 🔍 启动确认日志
-// ======================
-console.log("🟢 Initializing server...");
-
-// ======================
-// ❤️ Health Check（Render检测用）
-// ======================
-app.get("/", (req, res) => {
-  res.json({
-    status: "ok",
-    service: "Render Stable Template v1.0"
-  });
+// ===== 健康检查（Render 必备）=====
+app.get("/health", (req, res) => {
+  res.json({ status: "ok", time: Date.now() });
 });
 
-// ======================
-// 🧪 Test API（验证是否真的运行）
-// ======================
-app.get("/test", (req, res) => {
-  res.send("OK - SERVER IS RUNNING");
-});
-
-// ======================
-// 🚀 Memory API（占位逻辑）
-// ======================
+// ===== AI 主接口（关键修复点）=====
 app.get("/memory", async (req, res) => {
-  const word = (req.query.word || "").toLowerCase().trim();
+  const word = req.query.word || "";
 
   if (!word) {
-    return res.json({ error: "no word provided" });
+    return res.json({
+      success: false,
+      error: "empty word"
+    });
   }
 
-  // 模拟稳定返回（先保证系统不炸）
-  return res.json({
-    success: true,
-    word,
-    split: "mock-split",
-    story: "mock story for testing",
-    memory: "mock memory",
-    tip: "mock tip"
-  });
+  try {
+    // ===== 这里替换成你的真实 AI API =====
+    const aiResponse = await timeoutFetch(
+      `https://api.openai.com/v1/responses`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${process.env.OPENAI_API_KEY}`
+        },
+        body: JSON.stringify({
+          model: "gpt-4.1-mini",
+          input: `请用英语单词生成：词义+例句+记忆技巧：${word}`
+        })
+      },
+      10000
+    );
+
+    const data = await aiResponse.json();
+
+    const output =
+      data?.output?.[0]?.content?.[0]?.text ||
+      "AI解析失败";
+
+    return res.json({
+      success: true,
+      word,
+      story: output,
+      memory: output,
+      tip: "AI已生成",
+      ts: Date.now()
+    });
+
+  } catch (err) {
+    console.error("AI ERROR:", err.message);
+
+    // ===== 兜底机制（防止前端显示空）=====
+    return res.json({
+      success: true,
+      word,
+      story: `fallback story for: ${word}`,
+      memory: `fallback memory for: ${word}`,
+      tip: "降级模式（API异常）",
+      fallback: true
+    });
+  }
 });
 
-// ======================
-// 🚀 关键：必须 listen（Render检测点）
-// ======================
+// ===== 启动 =====
+const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log("✅ SERVER LISTENING ON PORT:", PORT);
-});
-
-// ======================
-// 🧯 防崩溃（生产级必备）
-// ======================
-process.on("uncaughtException", (err) => {
-  console.log("🔥 uncaughtException:", err);
-});
-
-process.on("unhandledRejection", (err) => {
-  console.log("🔥 unhandledRejection:", err);
+  console.log("Server running on port", PORT);
 });
