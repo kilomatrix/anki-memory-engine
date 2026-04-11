@@ -1,24 +1,77 @@
 import express from "express";
 import fetch from "node-fetch";
+import crypto from "crypto";
 
 const app = express();
 app.use(express.json());
 
 // ======================
-// ENV KEYS（Render里配置）
+// ENV
 // ======================
 const GROQ_KEY = process.env.GROQ_KEY;
 const OPENROUTER_KEY = process.env.OPENROUTER_KEY;
 const DEEPSEEK_KEY = process.env.DEEPSEEK_KEY;
+const REDIS_URL = process.env.REDIS_URL;
 
 // ======================
-// AI CALL: GROQ
+// SIMPLE CACHE (Redis optional)
+// ======================
+let memoryCache = {};
+
+async function getCache(key) {
+  if (REDIS_URL) {
+    try {
+      const res = await fetch(`${REDIS_URL}/get/${key}`);
+      const data = await res.json();
+      return data?.value ? JSON.parse(data.value) : null;
+    } catch {
+      return memoryCache[key];
+    }
+  }
+  return memoryCache[key];
+}
+
+async function setCache(key, value) {
+  if (REDIS_URL) {
+    try {
+      await fetch(`${REDIS_URL}/set/${key}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ value: JSON.stringify(value) })
+      });
+    } catch {
+      memoryCache[key] = value;
+    }
+  } else {
+    memoryCache[key] = value;
+  }
+}
+
+// ======================
+// PROMPT (结构化JSON)
+// ======================
+function buildPrompt(word) {
+  return `
+你是英语记忆AI，请严格输出JSON，不要任何多余文字：
+
+{
+  "word": "${word}",
+  "meaning_cn": "",
+  "root_memory": "",
+  "story": "",
+  "exam_tip": ""
+}
+`;
+}
+
+// ======================
+// CALL MODELS
 // ======================
 async function callGroq(prompt) {
   const res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
     method: "POST",
     headers: {
-      "Authorization": `Bearer ${GROQ_KEY}`,
+      Authorization: `Bearer ${GROQ_KEY}`,
       "Content-Type": "application/json"
     },
     body: JSON.stringify({
@@ -27,19 +80,15 @@ async function callGroq(prompt) {
     })
   });
 
-  if (!res.ok) throw new Error("Groq failed");
   const data = await res.json();
-  return data.choices[0].message.content;
+  return data.choices?.[0]?.message?.content;
 }
 
-// ======================
-// AI CALL: OPENROUTER
-// ======================
 async function callOpenRouter(prompt) {
   const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
     method: "POST",
     headers: {
-      "Authorization": `Bearer ${OPENROUTER_KEY}`,
+      Authorization: `Bearer ${OPENROUTER_KEY}`,
       "Content-Type": "application/json"
     },
     body: JSON.stringify({
@@ -48,19 +97,15 @@ async function callOpenRouter(prompt) {
     })
   });
 
-  if (!res.ok) throw new Error("OpenRouter failed");
   const data = await res.json();
-  return data.choices[0].message.content;
+  return data.choices?.[0]?.message?.content;
 }
 
-// ======================
-// AI CALL: DEEPSEEK
-// ======================
 async function callDeepSeek(prompt) {
   const res = await fetch("https://api.deepseek.com/chat/completions", {
     method: "POST",
     headers: {
-      "Authorization": `Bearer ${DEEPSEEK_KEY}`,
+      Authorization: `Bearer ${DEEPSEEK_KEY}`,
       "Content-Type": "application/json"
     },
     body: JSON.stringify({
@@ -69,65 +114,115 @@ async function callDeepSeek(prompt) {
     })
   });
 
-  if (!res.ok) throw new Error("DeepSeek failed");
   const data = await res.json();
-  return data.choices[0].message.content;
+  return data.choices?.[0]?.message?.content;
 }
 
 // ======================
-// FALLBACK ENGINE
+// SAFE JSON PARSE
 // ======================
-async function askAI(prompt) {
+function safeParse(text) {
   try {
-    return await callGroq(prompt);
-  } catch (e1) {
-    console.log("Groq failed → switching OpenRouter");
-
-    try {
-      return await callOpenRouter(prompt);
-    } catch (e2) {
-      console.log("OpenRouter failed → switching DeepSeek");
-
-      try {
-        return await callDeepSeek(prompt);
-      } catch (e3) {
-        console.log("All AI failed");
-        return "AI服务暂时不可用，请稍后再试";
-      }
-    }
+    return JSON.parse(text);
+  } catch {
+    const match = text.match(/\{[\s\S]*\}/);
+    if (match) return JSON.parse(match[0]);
+    return null;
   }
 }
 
 // ======================
-// MEMORY API (核心)
+// MULTI MODEL VOTING
+// ======================
+async function askAllModels(prompt) {
+  const results = await Promise.allSettled([
+    callGroq(prompt),
+    callOpenRouter(prompt),
+    callDeepSeek(prompt)
+  ]);
+
+  const parsed = results
+    .filter(r => r.status === "fulfilled")
+    .map(r => safeParse(r.value))
+    .filter(Boolean);
+
+  return parsed;
+}
+
+// ======================
+// SIMPLE SCORING
+// ======================
+function scoreAnswer(ans) {
+  let score = 0;
+  if (ans.meaning_cn) score += 1;
+  if (ans.root_memory) score += 1;
+  if (ans.story) score += 1;
+  if (ans.exam_tip) score += 1;
+  return score;
+}
+
+// ======================
+// MERGE BEST ANSWER
+// ======================
+function mergeAnswers(list) {
+  if (!list.length) return null;
+
+  let best = list[0];
+  let bestScore = scoreAnswer(best);
+
+  for (let i = 1; i < list.length; i++) {
+    const s = scoreAnswer(list[i]);
+    if (s > bestScore) {
+      best = list[i];
+      bestScore = s;
+    }
+  }
+
+  return best;
+}
+
+// ======================
+// MAIN API
 // ======================
 app.get("/memory", async (req, res) => {
   const word = req.query.word;
+  if (!word) return res.json({ error: "missing word" });
 
-  if (!word) {
-    return res.json({ error: "missing word" });
+  const key = crypto.createHash("md5").update(word).digest("hex");
+
+  // 1. cache hit
+  const cached = await getCache(key);
+  if (cached) {
+    return res.json({
+      success: true,
+      source: "cache",
+      word,
+      result: cached
+    });
   }
 
-  const prompt = `
-你是一个英语学习助手，请输出：
-
-单词：${word}
-1. 中文意思
-2. 词根联想
-3. 一个短故事记忆法
-4. 一个考试提示
-
-格式要简洁清晰
-`;
+  const prompt = buildPrompt(word);
 
   try {
-    const result = await askAI(prompt);
+    // 2. multi model
+    const answers = await askAllModels(prompt);
+
+    // 3. merge best
+    const best = mergeAnswers(answers);
+
+    if (!best) throw new Error("No valid AI response");
+
+    // 4. save cache
+    await setCache(key, best);
 
     res.json({
       success: true,
+      source: "ai",
       word,
-      result
+      result: best,
+      models_used: answers.length
     });
+
   } catch (err) {
     res.json({
       success: false,
@@ -137,16 +232,11 @@ app.get("/memory", async (req, res) => {
 });
 
 // ======================
-// HEALTH CHECK
-// ======================
 app.get("/", (req, res) => {
-  res.send("AI Memory Engine Running 🚀");
+  res.send("Anki AI Engine Pro 🚀");
 });
 
-// ======================
-// START SERVER
-// ======================
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log("Server running on port", PORT);
+  console.log("Running on", PORT);
 });
