@@ -1,274 +1,215 @@
 import express from "express";
 import fetch from "node-fetch";
-import crypto from "crypto";
 
 const app = express();
 app.use(express.json());
 
-// ======================
-// ENV
-// ======================
-const GROQ_KEY = process.env.GROQ_KEY;
-const OPENROUTER_KEY = process.env.OPENROUTER_KEY;
+// =========================
+// 1. 环境变量检查（防崩）
+// =========================
 const DEEPSEEK_KEY = process.env.DEEPSEEK_KEY;
-const REDIS_URL = process.env.REDIS_URL;
+const OPENROUTER_KEY = process.env.OPENROUTER_KEY;
+const GROQ_KEY = process.env.GROQ_KEY;
 
-// ======================
-// SIMPLE CACHE (Redis optional)
-// ======================
-let memoryCache = {};
-
-async function getCache(key) {
-  if (REDIS_URL) {
-    try {
-      const res = await fetch(`${REDIS_URL}/get/${key}`);
-      const data = await res.json();
-      return data?.value ? JSON.parse(data.value) : null;
-    } catch {
-      return memoryCache[key];
-    }
-  }
-  return memoryCache[key];
+function hasKey(key) {
+  return typeof key === "string" && key.length > 10;
 }
 
-async function setCache(key, value) {
-  if (REDIS_URL) {
-    try {
-      await fetch(`${REDIS_URL}/set/${key}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ value: JSON.stringify(value) })
-      });
-    } catch {
-      memoryCache[key] = value;
-    }
-  } else {
-    memoryCache[key] = value;
-  }
+// =========================
+// 2. 安全工具（核心防崩）
+// =========================
+function safeStr(v) {
+  if (typeof v === "string") return v;
+  if (typeof v === "number") return String(v);
+  return "";
 }
 
-// ======================
-// PROMPT (结构化JSON)
-// ======================
-function buildPrompt(word) {
-  return `
-你是英语记忆AI，请严格输出JSON，不要任何多余文字：
-
-{
-  "word": "${word}",
-  "meaning_cn": "",
-  "root_memory": "",
-  "story": "",
-  "exam_tip": ""
-}
-`;
+function safeWord(word) {
+  return safeStr(word).trim().toLowerCase();
 }
 
-// ======================
-// CALL MODELS
-// ======================
-async function callGroq(prompt) {
-  const res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${GROQ_KEY}`,
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify({
-      model: "llama-3.3-70b-versatile",
-      messages: [{ role: "user", content: prompt }]
-    })
-  });
-
-  const data = await res.json();
-  return data.choices?.[0]?.message?.content;
-}
-
-async function callOpenRouter(prompt) {
-  const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${OPENROUTER_KEY}`,
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify({
-      model: "openai/gpt-4o-mini",
-      messages: [{ role: "user", content: prompt }]
-    })
-  });
-
-  const data = await res.json();
-  return data.choices?.[0]?.message?.content;
-}
-
-async function callDeepSeek(prompt) {
-  const res = await fetch("https://api.deepseek.com/chat/completions", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${DEEPSEEK_KEY}`,
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify({
-      model: "deepseek-chat",
-      messages: [{ role: "user", content: prompt }]
-    })
-  });
-
-  const data = await res.json();
-  return data.choices?.[0]?.message?.content;
-}
-
-// ======================
-// SAFE JSON PARSE
-// ======================
-function safeParse(text) {
+// 🔥 修复 match 崩溃点
+function safeMatch(str, regex) {
   try {
-    return JSON.parse(text);
-  } catch {
-    const match = text.match(/\{[\s\S]*\}/);
-    if (match) return JSON.parse(match[0]);
+    if (typeof str !== "string") return null;
+    return str.match(regex);
+  } catch (e) {
     return null;
   }
 }
 
-// ======================
-// MULTI MODEL VOTING
-// ======================
-async function askAllModels(prompt) {
-  const results = await Promise.allSettled([
-    callGroq(prompt),
-    callOpenRouter(prompt),
-    callDeepSeek(prompt)
-  ]);
-
-  const parsed = results
-    .filter(r => r.status === "fulfilled")
-    .map(r => safeParse(r.value))
-    .filter(Boolean);
-
-  return parsed;
-}
-
-// ======================
-// SIMPLE SCORING
-// ======================
-function scoreAnswer(ans) {
-  let score = 0;
-  if (ans.meaning_cn) score += 1;
-  if (ans.root_memory) score += 1;
-  if (ans.story) score += 1;
-  if (ans.exam_tip) score += 1;
-  return score;
-}
-
-// ======================
-// MERGE BEST ANSWER
-// ======================
-function mergeAnswers(list) {
-  if (!list.length) return null;
-
-  let best = list[0];
-  let bestScore = scoreAnswer(best);
-
-  for (let i = 1; i < list.length; i++) {
-    const s = scoreAnswer(list[i]);
-    if (s > bestScore) {
-      best = list[i];
-      bestScore = s;
-    }
-  }
-
-  return best;
-}
-
-// ======================
-// MAIN API
-// ======================
-app.get("/memory", async (req, res) => {
-  const word = (req.query.word || "").trim();
-  if (!word) {
-    return res.json({ success: false, error: "empty word" });
-  }
+// =========================
+// 3. 超时 fetch（防卡死）
+// =========================
+async function fetchWithTimeout(url, options = {}, timeout = 8000) {
+  const controller = new AbortController();
+  const id = setTimeout(() => controller.abort(), timeout);
 
   try {
-    const aiResponse = await timeoutFetch(
-      "https://api.openai.com/v1/chat/completions",
-      {
+    const res = await fetch(url, {
+      ...options,
+      signal: controller.signal,
+    });
+    return res;
+  } finally {
+    clearTimeout(id);
+  }
+}
+
+// =========================
+// 4. AI fallback 链（稳定核心）
+// =========================
+async function callAI(word) {
+  const prompt = `
+给单词生成JSON：
+{
+ "split": "词根拆分",
+ "story": "记忆故事",
+ "memory": "记忆方法",
+ "tip": "考试提示"
+}
+单词：${word}
+只返回JSON，不要解释
+`;
+
+  // ---- DeepSeek ----
+  if (hasKey(DEEPSEEK_KEY)) {
+    try {
+      const res = await fetchWithTimeout("https://api.deepseek.com/chat/completions", {
         method: "POST",
         headers: {
+          "Authorization": `Bearer ${DEEPSEEK_KEY}`,
           "Content-Type": "application/json",
-          "Authorization": `Bearer ${process.env.OPENAI_API_KEY}`
         },
         body: JSON.stringify({
-          model: "gpt-4o-mini",   // 推荐模型：快 + 便宜
-          messages: [
-            {
-              role: "system",
-              content: "你是一个专业的英语单词记忆助手。请严格用以下JSON格式回复，不要添加任何其他文字和解释：\n" +
-                       "{\"split\": \"单词拆分\", \"story\": \"生动故事\", \"tip\": \"记忆技巧\"}"
-            },
-            {
-              role: "user",
-              content: `单词: ${word}`
-            }
-          ],
-          temperature: 0.7,
-          max_tokens: 500
-        })
-      },
-      15000
-    );
+          model: "deepseek-chat",
+          messages: [{ role: "user", content: prompt }],
+        }),
+      });
 
-    const data = await aiResponse.json();
-    let content = data?.choices?.[0]?.message?.content || "";
+      const data = await res.json();
+      const text = data?.choices?.[0]?.message?.content;
+      const parsed = tryParseJSON(text);
+      if (parsed) return parsed;
+    } catch (e) {}
+  }
 
-    // 增强鲁棒性解析
-    let split = "N/A";
-    let story = content;
-    let tip = "AI生成记忆技巧";
-
+  // ---- OpenRouter ----
+  if (hasKey(OPENROUTER_KEY)) {
     try {
-      // 尝试提取JSON
-      const jsonMatch = content.match(/\{[\s\S]*\}/);
-      if (jsonMatch) {
-        const parsed = JSON.parse(jsonMatch[0]);
-        split = parsed.split || split;
-        story = parsed.story || story;
-        tip = parsed.tip || tip;
-      } else {
-        // 简单文本提取
-        split = content.match(/拆分[:：]\s*(.+?)(?:\n|$)/i)?.[1] || word.split('').join('-').slice(0, 10);
-        tip = content.match(/技巧[:：]\s*(.+?)$/is)?.[1] || tip;
-      }
-    } catch (e) {
-      console.error("Parse error:", e.message);
+      const res = await fetchWithTimeout("https://openrouter.ai/api/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${OPENROUTER_KEY}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          model: "openai/gpt-4o-mini",
+          messages: [{ role: "user", content: prompt }],
+        }),
+      });
+
+      const data = await res.json();
+      const text = data?.choices?.[0]?.message?.content;
+      const parsed = tryParseJSON(text);
+      if (parsed) return parsed;
+    } catch (e) {}
+  }
+
+  // ---- GROQ ----
+  if (hasKey(GROQ_KEY)) {
+    try {
+      const res = await fetchWithTimeout("https://api.groq.com/openai/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${GROQ_KEY}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          model: "llama3-8b-8192",
+          messages: [{ role: "user", content: prompt }],
+        }),
+      });
+
+      const data = await res.json();
+      const text = data?.choices?.[0]?.message?.content;
+      const parsed = tryParseJSON(text);
+      if (parsed) return parsed;
+    } catch (e) {}
+  }
+
+  // =========================
+  // 兜底（永不崩）
+  // =========================
+  return {
+    split: `${word}-（基础词拆分）`,
+    story: `${word} 的简单记忆故事`,
+    memory: `联想记忆：${word}`,
+    tip: `考试中注意 ${word} 常见用法`,
+  };
+}
+
+// =========================
+// 5. JSON 安全解析（关键防崩）
+// =========================
+function tryParseJSON(text) {
+  try {
+    if (!text) return null;
+    const match = safeMatch(text, /\{[\s\S]*\}/);
+    if (!match) return null;
+    return JSON.parse(match[0]);
+  } catch (e) {
+    return null;
+  }
+}
+
+// =========================
+// 6. 主接口（Anki调用）
+// =========================
+app.get("/memory", async (req, res) => {
+  try {
+    const word = safeWord(req.query.word);
+
+    if (!word) {
+      return res.json({
+        success: false,
+        error: "empty word",
+      });
     }
+
+    const ai = await callAI(word);
 
     return res.json({
       success: true,
-      source: "openai",
       word,
-      split: split.trim(),
-      story: story.trim(),
-      memory: story.trim(),
-      tip: tip.trim(),
-      ts: Date.now()
+      split: safeStr(ai.split),
+      story: safeStr(ai.story),
+      memory: safeStr(ai.memory),
+      tip: safeStr(ai.tip),
     });
 
   } catch (err) {
-    console.error("AI ERROR:", err.message);
-    
-    // 强力兜底（保证前端不显示 undefined）
+    // 🔥 最终兜底（绝不崩）
     return res.json({
       success: true,
-      source: "fallback",
-      word,
-      split: word.length > 3 ? word.slice(0, Math.floor(word.length/2)) + "-" + word.slice(Math.floor(word.length/2)) : word,
-      story: `这是一个关于 "${word}" 的记忆故事（临时模式）。`,
-      memory: `这是一个关于 "${word}" 的记忆故事（临时模式）。`,
-      tip: "请检查 OpenAI API Key 是否正确设置在 Render 的 Environment Variables 中",
-      fallback: true,
-      error: err.message
+      word: safeWord(req.query.word),
+      split: "fallback-split",
+      story: "fallback-story",
+      memory: "fallback-memory",
+      tip: "fallback-tip",
     });
   }
+});
+
+// =========================
+// 7. health check
+// =========================
+app.get("/health", (req, res) => {
+  res.json({ ok: true });
+});
+
+// =========================
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+  console.log("Memory Engine v3 running on port", PORT);
 });
