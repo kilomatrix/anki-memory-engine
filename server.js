@@ -6,106 +6,161 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// ======================
-// 🔥 必须使用 Render PORT
-// ======================
 const PORT = process.env.PORT || 3000;
 const OPENAI_KEY = process.env.OPENAI_KEY;
 
 // ======================
-// 🔥 健康检查（Render 用来判断服务是否活着）
+// 🧠 简易内存缓存（2.0核心升级）
+// ======================
+const memoryCache = new Map();
+
+// TTL 10分钟缓存
+const CACHE_TIME = 10 * 60 * 1000;
+
+// ======================
+// 🔥 Health Check
 // ======================
 app.get("/", (req, res) => {
-  res.send("Anki Memory Engine Running 🚀");
+  res.send("Memory Engine 2.0 🚀 Running");
 });
 
 // ======================
-// 核心 API
+// 🧠 Memory API (2.0核心)
 // ======================
 app.get("/memory", async (req, res) => {
   const word = (req.query.word || "").trim().toLowerCase();
 
-  if (!word) {
-    return res.json({ error: "no word" });
-  }
+  if (!word) return res.json({ error: "no word" });
+  if (!OPENAI_KEY) return res.json({ error: "OPENAI_KEY missing" });
 
-  if (!OPENAI_KEY) {
-    return res.json({ error: "OPENAI_KEY missing" });
+  // ======================
+  // 🧠 CACHE HIT
+  // ======================
+  const cached = memoryCache.get(word);
+  if (cached && Date.now() - cached.time < CACHE_TIME) {
+    return res.json({
+      success: true,
+      word,
+      cached: true,
+      ...cached.data
+    });
   }
 
   try {
-    const r = await fetch("https://api.openai.com/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "Authorization": `Bearer ${OPENAI_KEY}`,
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify({
-        model: "gpt-4o-mini",
-        temperature: 0.9,
-        presence_penalty: 0.8,
-        frequency_penalty: 0.6,
-        messages: [
-          {
-            role: "system",
-            content: `
-你是英语单词记忆AI。
+    const result = await callAI(word);
 
-只输出JSON，不要任何解释：
-
-{
-  "split": "词根拆分",
-  "story": "记忆故事",
-  "memory": "核心记忆",
-  "tip": "动作提示"
-}
-`
-          },
-          {
-            role: "user",
-            content: `单词：${word}`
-          }
-        ]
-      })
+    // 存缓存
+    memoryCache.set(word, {
+      time: Date.now(),
+      data: result
     });
-
-    const data = await r.json();
-
-    console.log("GPT RAW:", data);
-
-    let content = data?.choices?.[0]?.message?.content || "";
-
-    let jsonStr = content.match(/\{[\s\S]*\}/);
-
-    if (!jsonStr) {
-      throw new Error("No JSON found");
-    }
-
-    let result = JSON.parse(jsonStr[0]);
 
     return res.json({
       success: true,
       word,
+      cached: false,
       ...result
     });
 
   } catch (err) {
-    console.log("AI ERROR:", err);
+    console.log("AI ERROR:", err.message);
 
     return res.json({
       success: false,
       word,
       split: word,
-      story: "AI解析失败",
-      memory: "fallback",
-      tip: "检查API或网络"
+      story: "AI生成失败（已降级）",
+      memory: "fallback mode",
+      tip: "请重试或检查API"
     });
   }
 });
 
 // ======================
-// 🔥 关键：必须 listen
+// 🤖 AI调用层（2.0稳定增强）
+// ======================
+async function callAI(word, retry = 2) {
+  const prompt = `
+你是英语单词记忆专家。
+
+⚠ 必须严格输出 JSON（不能有任何额外文字）
+
+格式：
+{
+  "split": "词根拆分（必须结构分析）",
+  "story": "强画面记忆故事（必须具体）",
+  "memory": "一句话核心记忆法（必须唯一）",
+  "tip": "动作/场景辅助记忆"
+}
+
+规则：
+- 禁止通用解释
+- 禁止重复模板
+- 必须基于词形或语义联想
+- 必须可视化
+`;
+
+  const r = await fetch("https://api.openai.com/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${OPENAI_KEY}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      model: "gpt-4o-mini",
+      temperature: 0.95,
+      presence_penalty: 0.8,
+      frequency_penalty: 0.6,
+      messages: [
+        { role: "system", content: prompt },
+        { role: "user", content: `word: ${word}` }
+      ]
+    })
+  });
+
+  const data = await r.json();
+
+  const content = data?.choices?.[0]?.message?.content || "";
+
+  console.log("RAW:", content);
+
+  const json = extractJSON(content);
+
+  if (!json && retry > 0) {
+    console.log("Retrying AI...", retry);
+    return callAI(word, retry - 1);
+  }
+
+  if (!json) throw new Error("Invalid JSON from AI");
+
+  return json;
+}
+
+// ======================
+// 🧠 JSON 安全解析（2.0增强）
+// ======================
+function extractJSON(text) {
+  try {
+    const match = text.match(/\{[\s\S]*\}/);
+    if (!match) return null;
+
+    const obj = JSON.parse(match[0]);
+
+    // 基础字段保护
+    if (!obj.split || !obj.story || !obj.memory || !obj.tip) {
+      return null;
+    }
+
+    return obj;
+
+  } catch (e) {
+    return null;
+  }
+}
+
+// ======================
+// 🔥 启动服务（必须）
 // ======================
 app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
+  console.log("Memory Engine 2.0 running on port", PORT);
 });
