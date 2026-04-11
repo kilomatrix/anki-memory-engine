@@ -1,6 +1,5 @@
 import express from "express";
 import cors from "cors";
-import fetch from "node-fetch";
 
 const app = express();
 app.use(cors());
@@ -10,157 +9,196 @@ const PORT = process.env.PORT || 3000;
 const OPENAI_KEY = process.env.OPENAI_KEY;
 
 // ======================
-// 🧠 简易内存缓存（2.0核心升级）
+// 🧠 LRU CACHE（生产级）
 // ======================
-const memoryCache = new Map();
+class LRUCache {
+  constructor(limit = 200) {
+    this.limit = limit;
+    this.map = new Map();
+  }
 
-// TTL 10分钟缓存
-const CACHE_TIME = 10 * 60 * 1000;
+  get(key) {
+    if (!this.map.has(key)) return null;
+    const value = this.map.get(key);
+    this.map.delete(key);
+    this.map.set(key, value);
+    return value;
+  }
+
+  set(key, value) {
+    if (this.map.has(key)) this.map.delete(key);
+    this.map.set(key, value);
+
+    if (this.map.size > this.limit) {
+      const firstKey = this.map.keys().next().value;
+      this.map.delete(firstKey);
+    }
+  }
+}
+
+const cache = new LRUCache(300);
 
 // ======================
-// 🔥 Health Check
+// 🚦 简单限流（防爆OpenAI）
+// ======================
+let requestCount = 0;
+setInterval(() => (requestCount = 0), 1000);
+
+// ======================
+// ❤️ Health Check（Render必备）
 // ======================
 app.get("/", (req, res) => {
-  res.send("Memory Engine 2.0 🚀 Running");
+  res.json({
+    status: "ok",
+    service: "Memory Engine 3.0"
+  });
 });
 
 // ======================
-// 🧠 Memory API (2.0核心)
+// 🧠 Memory API
 // ======================
 app.get("/memory", async (req, res) => {
-  const word = (req.query.word || "").trim().toLowerCase();
-
-  if (!word) return res.json({ error: "no word" });
-  if (!OPENAI_KEY) return res.json({ error: "OPENAI_KEY missing" });
-
-  // ======================
-  // 🧠 CACHE HIT
-  // ======================
-  const cached = memoryCache.get(word);
-  if (cached && Date.now() - cached.time < CACHE_TIME) {
-    return res.json({
-      success: true,
-      word,
-      cached: true,
-      ...cached.data
-    });
-  }
-
   try {
-    const result = await callAI(word);
+    const word = (req.query.word || "").trim().toLowerCase();
+    if (!word) return res.json({ error: "no word" });
+    if (!OPENAI_KEY) return res.json({ error: "missing key" });
 
-    // 存缓存
-    memoryCache.set(word, {
-      time: Date.now(),
-      data: result
-    });
+    // 🚦 限流
+    if (requestCount > 20) {
+      return res.json({ error: "rate limited" });
+    }
+    requestCount++;
+
+    // 🧠 cache
+    const cached = cache.get(word);
+    if (cached) {
+      return res.json({
+        success: true,
+        word,
+        cached: true,
+        ...cached
+      });
+    }
+
+    const data = await callOpenAI(word);
+
+    cache.set(word, data);
 
     return res.json({
       success: true,
       word,
       cached: false,
-      ...result
+      ...data
     });
 
   } catch (err) {
-    console.log("AI ERROR:", err.message);
+    console.log("FATAL ERROR:", err);
 
     return res.json({
       success: false,
-      word,
-      split: word,
-      story: "AI生成失败（已降级）",
-      memory: "fallback mode",
-      tip: "请重试或检查API"
+      fallback: true,
+      story: "系统降级模式",
+      memory: "fallback",
+      tip: "请稍后重试"
     });
   }
 });
 
 // ======================
-// 🤖 AI调用层（2.0稳定增强）
+// 🤖 OpenAI（3.0增强版）
 // ======================
-async function callAI(word, retry = 2) {
-  const prompt = `
-你是英语单词记忆专家。
+async function callOpenAI(word, retry = 2) {
+  try {
+    const r = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${OPENAI_KEY}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        model: "gpt-4o-mini",
+        temperature: 0.9,
+        messages: [
+          {
+            role: "system",
+            content: `
+你是英语单词记忆AI。
 
-⚠ 必须严格输出 JSON（不能有任何额外文字）
+必须返回严格JSON：
 
-格式：
 {
-  "split": "词根拆分（必须结构分析）",
-  "story": "强画面记忆故事（必须具体）",
-  "memory": "一句话核心记忆法（必须唯一）",
-  "tip": "动作/场景辅助记忆"
+  "split": "",
+  "story": "",
+  "memory": "",
+  "tip": ""
 }
 
-规则：
-- 禁止通用解释
-- 禁止重复模板
-- 必须基于词形或语义联想
-- 必须可视化
-`;
+禁止任何额外文本。
+`
+          },
+          {
+            role: "user",
+            content: word
+          }
+        ]
+      })
+    });
 
-  const r = await fetch("https://api.openai.com/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      "Authorization": `Bearer ${OPENAI_KEY}`,
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify({
-      model: "gpt-4o-mini",
-      temperature: 0.95,
-      presence_penalty: 0.8,
-      frequency_penalty: 0.6,
-      messages: [
-        { role: "system", content: prompt },
-        { role: "user", content: `word: ${word}` }
-      ]
-    })
-  });
+    const data = await r.json();
 
-  const data = await r.json();
+    let text = data?.choices?.[0]?.message?.content || "";
 
-  const content = data?.choices?.[0]?.message?.content || "";
+    const json = safeParse(text);
 
-  console.log("RAW:", content);
+    if (!json && retry > 0) {
+      return callOpenAI(word, retry - 1);
+    }
 
-  const json = extractJSON(content);
+    if (!json) throw new Error("Invalid JSON");
 
-  if (!json && retry > 0) {
-    console.log("Retrying AI...", retry);
-    return callAI(word, retry - 1);
+    return json;
+
+  } catch (e) {
+    if (retry > 0) return callOpenAI(word, retry - 1);
+    throw e;
   }
-
-  if (!json) throw new Error("Invalid JSON from AI");
-
-  return json;
 }
 
 // ======================
-// 🧠 JSON 安全解析（2.0增强）
+// 🧠 安全JSON解析（3.0核心）
 // ======================
-function extractJSON(text) {
+function safeParse(text) {
   try {
     const match = text.match(/\{[\s\S]*\}/);
     if (!match) return null;
 
     const obj = JSON.parse(match[0]);
 
-    // 基础字段保护
     if (!obj.split || !obj.story || !obj.memory || !obj.tip) {
       return null;
     }
 
     return obj;
 
-  } catch (e) {
+  } catch {
     return null;
   }
 }
 
 // ======================
-// 🔥 启动服务（必须）
+// 🚀 关键启动（防Render挂）
 // ======================
 app.listen(PORT, () => {
-  console.log("Memory Engine 2.0 running on port", PORT);
+  console.log("🚀 Memory Engine 3.0 running on", PORT);
+});
+
+// ======================
+// 🧯 防 silent crash
+// ======================
+process.on("uncaughtException", (err) => {
+  console.log("UNCUGHT:", err);
+});
+
+process.on("unhandledRejection", (err) => {
+  console.log("REJECTION:", err);
 });
