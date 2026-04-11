@@ -1,84 +1,154 @@
 import express from "express";
-import cors from "cors";
+import fetch from "node-fetch";
 
 const app = express();
-
-// ======================
-// 基础中间件（稳定核心）
-// ======================
-app.use(cors());
 app.use(express.json());
 
-// ======================
-// 健康检查（Render必备）
-// ======================
-app.get("/", (req, res) => {
-  res.send("AI Memory Engine v2 Running 🚀");
-});
+/**
+ * 统一配置（Render 环境变量）
+ */
+const PROVIDERS = {
+  openai: {
+    url: "https://api.openai.com/v1/chat/completions",
+    key: process.env.OPENAI_API_KEY,
+    model: "gpt-4o-mini",
+    headers: (key) => ({
+      "Authorization": `Bearer ${key}`,
+      "Content-Type": "application/json",
+    }),
+    body: (model, prompt) => ({
+      model,
+      messages: [{ role: "user", content: prompt }],
+      temperature: 0.7,
+    }),
+  },
 
-// ======================
-// AI记忆接口（核心）
-// ======================
+  deepseek: {
+    url: "https://api.deepseek.com/v1/chat/completions",
+    key: process.env.DEEPSEEK_API_KEY,
+    model: "deepseek-chat",
+    headers: (key) => ({
+      "Authorization": `Bearer ${key}`,
+      "Content-Type": "application/json",
+    }),
+    body: (model, prompt) => ({
+      model,
+      messages: [{ role: "user", content: prompt }],
+      temperature: 0.7,
+    }),
+  },
+
+  groq: {
+    url: "https://api.groq.com/openai/v1/chat/completions",
+    key: process.env.GROQ_API_KEY,
+    model: "llama-3.1-70b-versatile",
+    headers: (key) => ({
+      "Authorization": `Bearer ${key}`,
+      "Content-Type": "application/json",
+    }),
+    body: (model, prompt) => ({
+      model,
+      messages: [{ role: "user", content: prompt }],
+      temperature: 0.7,
+    }),
+  },
+
+  openrouter: {
+    url: "https://openrouter.ai/api/v1/chat/completions",
+    key: process.env.OPENROUTER_API_KEY,
+    model: "openai/gpt-4o-mini",
+    headers: (key) => ({
+      "Authorization": `Bearer ${key}`,
+      "Content-Type": "application/json",
+      "HTTP-Referer": "https://your-app.com",
+      "X-Title": "word-memory-app",
+    }),
+    body: (model, prompt) => ({
+      model,
+      messages: [{ role: "user", content: prompt }],
+      temperature: 0.7,
+    }),
+  },
+};
+
+/**
+ * 调用 AI
+ */
+async function callLLM(provider, prompt) {
+  const cfg = PROVIDERS[provider];
+  if (!cfg) throw new Error("Unknown provider");
+
+  const key = cfg.key;
+  if (!key) throw new Error(`Missing API key for ${provider}`);
+
+  const response = await fetch(cfg.url, {
+    method: "POST",
+    headers: cfg.headers(key),
+    body: JSON.stringify(cfg.body(cfg.model, prompt)),
+  });
+
+  const data = await response.json();
+
+  if (!data.choices?.[0]?.message?.content) {
+    throw new Error(JSON.stringify(data));
+  }
+
+  return data.choices[0].message.content;
+}
+
+/**
+ * prompt 生成
+ */
+function buildPrompt(word) {
+  return `你是一位英语记忆专家，请对单词：${word} 做教学讲解：
+1. 拆分记忆
+2. 联想记忆
+3. 中文桥接
+4. 一句话口诀
+
+请严格输出JSON格式：
+{
+  "word": "",
+  "split": "",
+  "association": "",
+  "bridge": "",
+  "mnemonic": ""
+}`;
+}
+
+/**
+ * API
+ * /memory?word=apple&provider=openai
+ */
 app.get("/memory", async (req, res) => {
-
   try {
-    const word = (req.query.word || "").trim();
+    const word = req.query.word;
+    const provider = req.query.provider || "openai";
 
     if (!word) {
-      return res.status(400).json({
-        success: false,
-        error: "word is required"
-      });
+      return res.status(400).send({ error: "missing word" });
     }
 
-    // ======================
-    // ⭐ AI逻辑（先用稳定mock，可后续接LLM）
-    // ======================
-    const response = generateMemory(word);
+    const prompt = buildPrompt(word);
 
-    return res.json({
-      success: true,
-      word,
-      split: mockSplit(word),
-      story: response.story,
-      memory: response.memory,
-      tip: response.tip
-    });
+    const result = await callLLM(provider, prompt);
 
+    // 尝试解析 JSON（防止模型输出带代码块）
+    let json;
+    try {
+      json = JSON.parse(result);
+    } catch (e) {
+      json = { raw: result };
+    }
+
+    res.json(json);
   } catch (err) {
-    console.error("ERROR:", err);
-
-    return res.status(500).json({
-      success: false,
-      error: "internal server error"
+    res.status(500).send({
+      error: err.message,
     });
   }
 });
 
-// ======================
-// MOCK AI（稳定核心）
-// ======================
-function generateMemory(word) {
-
-  return {
-    story: `在一个语言世界里，“${word}”是一个关键角色，它不断被人们使用和记住。`,
-    memory: `把 ${word} 想象成一个生活中的场景，让大脑建立画面记忆。`,
-    tip: `每天重复使用 ${word} 3次，可以强化长期记忆。`
-  };
-}
-
-// 简单拆分
-function mockSplit(word) {
-  if (word.length <= 3) return word;
-  const mid = Math.floor(word.length / 2);
-  return word.slice(0, mid) + "-" + word.slice(mid);
-}
-
-// ======================
-// 启动服务（Render标准）
-// ======================
-const port = process.env.PORT || 3000;
-
-app.listen(port, () => {
-  console.log("🚀 AI Memory Engine v2 running on port", port);
+app.listen(process.env.PORT || 3000, () => {
+  console.log("Server running...");
 });
