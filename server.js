@@ -185,58 +185,90 @@ function mergeAnswers(list) {
 // MAIN API
 // ======================
 app.get("/memory", async (req, res) => {
-  const word = req.query.word;
-  if (!word) return res.json({ error: "missing word" });
-
-  const key = crypto.createHash("md5").update(word).digest("hex");
-
-  // 1. cache hit
-  const cached = await getCache(key);
-  if (cached) {
-    return res.json({
-      success: true,
-      source: "cache",
-      word,
-      result: cached
-    });
+  const word = (req.query.word || "").trim();
+  if (!word) {
+    return res.json({ success: false, error: "empty word" });
   }
 
-  const prompt = buildPrompt(word);
-
   try {
-    // 2. multi model
-    const answers = await askAllModels(prompt);
+    const aiResponse = await timeoutFetch(
+      "https://api.openai.com/v1/chat/completions",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${process.env.OPENAI_API_KEY}`
+        },
+        body: JSON.stringify({
+          model: "gpt-4o-mini",   // 推荐模型：快 + 便宜
+          messages: [
+            {
+              role: "system",
+              content: "你是一个专业的英语单词记忆助手。请严格用以下JSON格式回复，不要添加任何其他文字和解释：\n" +
+                       "{\"split\": \"单词拆分\", \"story\": \"生动故事\", \"tip\": \"记忆技巧\"}"
+            },
+            {
+              role: "user",
+              content: `单词: ${word}`
+            }
+          ],
+          temperature: 0.7,
+          max_tokens: 500
+        })
+      },
+      15000
+    );
 
-    // 3. merge best
-    const best = mergeAnswers(answers);
+    const data = await aiResponse.json();
+    let content = data?.choices?.[0]?.message?.content || "";
 
-    if (!best) throw new Error("No valid AI response");
+    // 增强鲁棒性解析
+    let split = "N/A";
+    let story = content;
+    let tip = "AI生成记忆技巧";
 
-    // 4. save cache
-    await setCache(key, best);
+    try {
+      // 尝试提取JSON
+      const jsonMatch = content.match(/\{[\s\S]*\}/);
+      if (jsonMatch) {
+        const parsed = JSON.parse(jsonMatch[0]);
+        split = parsed.split || split;
+        story = parsed.story || story;
+        tip = parsed.tip || tip;
+      } else {
+        // 简单文本提取
+        split = content.match(/拆分[:：]\s*(.+?)(?:\n|$)/i)?.[1] || word.split('').join('-').slice(0, 10);
+        tip = content.match(/技巧[:：]\s*(.+?)$/is)?.[1] || tip;
+      }
+    } catch (e) {
+      console.error("Parse error:", e.message);
+    }
 
-    res.json({
+    return res.json({
       success: true,
-      source: "ai",
+      source: "openai",
       word,
-      result: best,
-      models_used: answers.length
+      split: split.trim(),
+      story: story.trim(),
+      memory: story.trim(),
+      tip: tip.trim(),
+      ts: Date.now()
     });
 
   } catch (err) {
-    res.json({
-      success: false,
+    console.error("AI ERROR:", err.message);
+    
+    // 强力兜底（保证前端不显示 undefined）
+    return res.json({
+      success: true,
+      source: "fallback",
+      word,
+      split: word.length > 3 ? word.slice(0, Math.floor(word.length/2)) + "-" + word.slice(Math.floor(word.length/2)) : word,
+      story: `这是一个关于 "${word}" 的记忆故事（临时模式）。`,
+      memory: `这是一个关于 "${word}" 的记忆故事（临时模式）。`,
+      tip: "请检查 OpenAI API Key 是否正确设置在 Render 的 Environment Variables 中",
+      fallback: true,
       error: err.message
     });
   }
-});
-
-// ======================
-app.get("/", (req, res) => {
-  res.send("Anki AI Engine Pro 🚀");
-});
-
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log("Running on", PORT);
 });
