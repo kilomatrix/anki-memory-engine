@@ -1,250 +1,152 @@
 import express from "express";
-import cors from "cors";
 import fetch from "node-fetch";
-import sqlite3 from "sqlite3";
-import Redis from "ioredis";
 
 const app = express();
-app.use(cors());
 app.use(express.json());
 
-// ================= Redis =================
-let redis = null;
-if (process.env.REDIS_URL) {
-  redis = new Redis(process.env.REDIS_URL);
-  console.log("✅ Redis connected");
-} else {
-  console.log("⚠️ Redis not configured");
-}
+// ======================
+// ENV KEYS（Render里配置）
+// ======================
+const GROQ_KEY = process.env.GROQ_KEY;
+const OPENROUTER_KEY = process.env.OPENROUTER_KEY;
+const DEEPSEEK_KEY = process.env.DEEPSEEK_KEY;
 
-// ================= SQLite =================
-const db = new sqlite3.Database("./memory.db");
-
-db.run(`
-CREATE TABLE IF NOT EXISTS memory (
-  word TEXT PRIMARY KEY,
-  data TEXT,
-  count INTEGER DEFAULT 1,
-  correct INTEGER DEFAULT 0,
-  wrong INTEGER DEFAULT 0,
-  strength REAL DEFAULT 0.5,
-  updatedAt INTEGER
-)
-`);
-
-// ================= 工具 =================
-function updateStrength(row, isCorrect) {
-  let s = row?.strength || 0.5;
-  s += isCorrect ? 0.1 : -0.15;
-  if (s > 1) s = 1;
-  if (s < 0) s = 0;
-  return s;
-}
-
-// ================= AI Providers =================
-async function callDeepSeek(word) {
-  const res = await fetch("https://api.deepseek.com/v1/chat/completions", {
+// ======================
+// AI CALL: GROQ
+// ======================
+async function callGroq(prompt) {
+  const res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
     method: "POST",
     headers: {
-      "Authorization": `Bearer ${process.env.DEEPSEEK_KEY}`,
+      "Authorization": `Bearer ${GROQ_KEY}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      model: "llama-3.3-70b-versatile",
+      messages: [{ role: "user", content: prompt }]
+    })
+  });
+
+  if (!res.ok) throw new Error("Groq failed");
+  const data = await res.json();
+  return data.choices[0].message.content;
+}
+
+// ======================
+// AI CALL: OPENROUTER
+// ======================
+async function callOpenRouter(prompt) {
+  const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${OPENROUTER_KEY}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      model: "openai/gpt-4o-mini",
+      messages: [{ role: "user", content: prompt }]
+    })
+  });
+
+  if (!res.ok) throw new Error("OpenRouter failed");
+  const data = await res.json();
+  return data.choices[0].message.content;
+}
+
+// ======================
+// AI CALL: DEEPSEEK
+// ======================
+async function callDeepSeek(prompt) {
+  const res = await fetch("https://api.deepseek.com/chat/completions", {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${DEEPSEEK_KEY}`,
       "Content-Type": "application/json"
     },
     body: JSON.stringify({
       model: "deepseek-chat",
-      messages: [{ role: "user", content: `Explain "${word}" with meaning and memory trick` }]
+      messages: [{ role: "user", content: prompt }]
     })
   });
 
+  if (!res.ok) throw new Error("DeepSeek failed");
   const data = await res.json();
-  return data.choices?.[0]?.message?.content;
+  return data.choices[0].message.content;
 }
 
-async function callOpenRouter(word) {
-  const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      "Authorization": `Bearer ${process.env.OPENROUTER_KEY}`,
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify({
-      model: "openai/gpt-3.5-turbo",
-      messages: [{ role: "user", content: `Explain "${word}" with meaning and memory trick` }]
-    })
-  });
-
-  const data = await res.json();
-  return data.choices?.[0]?.message?.content;
-}
-
-async function callGroq(word) {
-  const res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      "Authorization": `Bearer ${process.env.GROQ_KEY}`,
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify({
-      model: "llama3-8b-8192",
-      messages: [{ role: "user", content: `Explain "${word}" with meaning and memory trick` }]
-    })
-  });
-
-  const data = await res.json();
-  return data.choices?.[0]?.message?.content;
-}
-
-// ================= AI调度 =================
-async function callAI(word) {
-  console.log("👉 AI start:", word);
-
+// ======================
+// FALLBACK ENGINE
+// ======================
+async function askAI(prompt) {
   try {
-    const r = await callDeepSeek(word);
-    if (r) return { text: r, source: "deepseek" };
-  } catch (e) {
-    console.log("❌ deepseek", e.message);
-  }
+    return await callGroq(prompt);
+  } catch (e1) {
+    console.log("Groq failed → switching OpenRouter");
 
-  try {
-    const r = await callOpenRouter(word);
-    if (r) return { text: r, source: "openrouter" };
-  } catch (e) {
-    console.log("❌ openrouter", e.message);
-  }
+    try {
+      return await callOpenRouter(prompt);
+    } catch (e2) {
+      console.log("OpenRouter failed → switching DeepSeek");
 
-  try {
-    const r = await callGroq(word);
-    if (r) return { text: r, source: "groq" };
-  } catch (e) {
-    console.log("❌ groq", e.message);
+      try {
+        return await callDeepSeek(prompt);
+      } catch (e3) {
+        console.log("All AI failed");
+        return "AI服务暂时不可用，请稍后再试";
+      }
+    }
   }
-
-  return {
-    text: `Memory trick: "${word}" sounds familiar.`,
-    source: "fallback"
-  };
 }
 
-// ================= /memory =================
+// ======================
+// MEMORY API (核心)
+// ======================
 app.get("/memory", async (req, res) => {
-  const word = (req.query.word || "").toLowerCase();
-  if (!word) return res.json({ success: false });
+  const word = req.query.word;
+
+  if (!word) {
+    return res.json({ error: "missing word" });
+  }
+
+  const prompt = `
+你是一个英语学习助手，请输出：
+
+单词：${word}
+1. 中文意思
+2. 词根联想
+3. 一个短故事记忆法
+4. 一个考试提示
+
+格式要简洁清晰
+`;
 
   try {
-    // ===== Redis =====
-    if (redis) {
-      const cache = await redis.get(word);
-      if (cache) {
-        return res.json({
-          success: true,
-          source: "redis",
-          ...JSON.parse(cache)
-        });
-      }
-    }
+    const result = await askAI(prompt);
 
-    // ===== SQLite =====
-    const row = await new Promise(resolve => {
-      db.get("SELECT * FROM memory WHERE word=?", [word], (_, r) => resolve(r));
-    });
-
-    if (row) {
-      const parsed = JSON.parse(row.data);
-
-      db.run(
-        "UPDATE memory SET count = count + 1, updatedAt=? WHERE word=?",
-        [Date.now(), word]
-      );
-
-      if (redis) {
-        await redis.set(word, row.data, "EX", 3600);
-      }
-
-      return res.json({
-        success: true,
-        source: "sqlite",
-        ...parsed,
-        strength: row.strength,
-        count: row.count
-      });
-    }
-
-    // ===== AI =====
-    const ai = await callAI(word);
-
-    const data = {
-      word,
-      story: ai.text,
-      memory: ai.text,
-      ts: Date.now()
-    };
-
-    const str = JSON.stringify(data);
-
-    db.run(
-      "INSERT INTO memory(word, data, updatedAt) VALUES (?, ?, ?)",
-      [word, str, Date.now()]
-    );
-
-    if (redis) {
-      await redis.set(word, str, "EX", 3600);
-    }
-
-    return res.json({
+    res.json({
       success: true,
-      source: ai.source,
-      ...data
+      word,
+      result
     });
-
   } catch (err) {
-    console.log("❌ ERROR:", err);
-
-    return res.json({
-      success: true,
-      source: "fallback",
-      word,
-      story: `Offline memory for ${word}`
+    res.json({
+      success: false,
+      error: err.message
     });
   }
 });
 
-// ================= /review =================
-app.post("/review", async (req, res) => {
-  const { word, correct } = req.body;
-
-  const row = await new Promise(resolve => {
-    db.get("SELECT * FROM memory WHERE word=?", [word], (_, r) => resolve(r));
-  });
-
-  if (!row) return res.json({ success: false });
-
-  const newStrength = updateStrength(row, correct);
-
-  db.run(
-    `UPDATE memory 
-     SET correct = correct + ?, 
-         wrong = wrong + ?, 
-         strength = ?, 
-         updatedAt=? 
-     WHERE word=?`,
-    [
-      correct ? 1 : 0,
-      correct ? 0 : 1,
-      newStrength,
-      Date.now(),
-      word
-    ]
-  );
-
-  res.json({ success: true, strength: newStrength });
+// ======================
+// HEALTH CHECK
+// ======================
+app.get("/", (req, res) => {
+  res.send("AI Memory Engine Running 🚀");
 });
 
-// ================= health =================
-app.get("/health", (req, res) => {
-  res.json({ ok: true, time: Date.now() });
-});
-
-// ================= start =================
+// ======================
+// START SERVER
+// ======================
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log("🚀 Memory Engine Pro running:", PORT);
+  console.log("Server running on port", PORT);
 });
