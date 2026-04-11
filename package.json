@@ -1,12 +1,13 @@
 {
-  "name": "anki-ai-engine-pro",
-  "version": "1.0.0",
+  "name": "anki-memory-engine-v2",
+  "version": "2.0.0",
   "type": "module",
-  "dependencies": {
-    "express": "^4.19.2",
-    "node-fetch": "^3.3.2"
-  },
+  "main": "server.js",
   "scripts": {
     "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "cors": "^2.8.5"
   }
 }
