@@ -1,5 +1,5 @@
-import express from "express";
-import cors from "cors";
+const express = require("express");
+const cors = require("cors");
 
 const app = express();
 app.use(cors());
@@ -9,48 +9,30 @@ const PORT = process.env.PORT || 3000;
 const OPENAI_KEY = process.env.OPENAI_KEY;
 
 // ======================
-// 🧠 LRU CACHE（生产级）
+// 🧠 强制保持进程存活（防 Render exit）
 // ======================
-class LRUCache {
-  constructor(limit = 200) {
-    this.limit = limit;
-    this.map = new Map();
-  }
-
-  get(key) {
-    if (!this.map.has(key)) return null;
-    const value = this.map.get(key);
-    this.map.delete(key);
-    this.map.set(key, value);
-    return value;
-  }
-
-  set(key, value) {
-    if (this.map.has(key)) this.map.delete(key);
-    this.map.set(key, value);
-
-    if (this.map.size > this.limit) {
-      const firstKey = this.map.keys().next().value;
-      this.map.delete(firstKey);
-    }
-  }
-}
-
-const cache = new LRUCache(300);
+setInterval(() => {
+  console.log("💓 heartbeat:", new Date().toISOString());
+}, 25000);
 
 // ======================
-// 🚦 简单限流（防爆OpenAI）
+// 🚀 启动日志（必须看到）
 // ======================
-let requestCount = 0;
-setInterval(() => (requestCount = 0), 1000);
+console.log("🚀 Server booting...");
 
 // ======================
-// ❤️ Health Check（Render必备）
+// 🧠 动态 fetch（Node 兼容方案）
+// ======================
+const fetchFn = (...args) =>
+  import("node-fetch").then(({ default: fetch }) => fetch(...args));
+
+// ======================
+// ❤️ Health Check
 // ======================
 app.get("/", (req, res) => {
   res.json({
     status: "ok",
-    service: "Memory Engine 3.0"
+    service: "Memory Engine FINAL v4.0"
   });
 });
 
@@ -58,58 +40,39 @@ app.get("/", (req, res) => {
 // 🧠 Memory API
 // ======================
 app.get("/memory", async (req, res) => {
+  const word = (req.query.word || "").trim().toLowerCase();
+
+  if (!word) return res.json({ error: "no word" });
+  if (!OPENAI_KEY) return res.json({ error: "missing OPENAI_KEY" });
+
   try {
-    const word = (req.query.word || "").trim().toLowerCase();
-    if (!word) return res.json({ error: "no word" });
-    if (!OPENAI_KEY) return res.json({ error: "missing key" });
-
-    // 🚦 限流
-    if (requestCount > 20) {
-      return res.json({ error: "rate limited" });
-    }
-    requestCount++;
-
-    // 🧠 cache
-    const cached = cache.get(word);
-    if (cached) {
-      return res.json({
-        success: true,
-        word,
-        cached: true,
-        ...cached
-      });
-    }
-
-    const data = await callOpenAI(word);
-
-    cache.set(word, data);
-
+    const result = await callOpenAI(word);
     return res.json({
       success: true,
       word,
-      cached: false,
-      ...data
+      ...result
     });
 
   } catch (err) {
-    console.log("FATAL ERROR:", err);
+    console.log("❌ ERROR:", err.message);
 
     return res.json({
       success: false,
-      fallback: true,
-      story: "系统降级模式",
-      memory: "fallback",
+      word,
+      split: word,
+      story: "系统降级（AI不可用）",
+      memory: "fallback mode",
       tip: "请稍后重试"
     });
   }
 });
 
 // ======================
-// 🤖 OpenAI（3.0增强版）
+// 🤖 OpenAI（Final Safe Mode）
 // ======================
 async function callOpenAI(word, retry = 2) {
   try {
-    const r = await fetch("https://api.openai.com/v1/chat/completions", {
+    const r = await fetchFn("https://api.openai.com/v1/chat/completions", {
       method: "POST",
       headers: {
         "Authorization": `Bearer ${OPENAI_KEY}`,
@@ -124,7 +87,7 @@ async function callOpenAI(word, retry = 2) {
             content: `
 你是英语单词记忆AI。
 
-必须返回严格JSON：
+必须只返回JSON：
 
 {
   "split": "",
@@ -133,7 +96,7 @@ async function callOpenAI(word, retry = 2) {
   "tip": ""
 }
 
-禁止任何额外文本。
+禁止任何多余文本。
 `
           },
           {
@@ -146,7 +109,7 @@ async function callOpenAI(word, retry = 2) {
 
     const data = await r.json();
 
-    let text = data?.choices?.[0]?.message?.content || "";
+    const text = data?.choices?.[0]?.message?.content || "";
 
     const json = safeParse(text);
 
@@ -165,7 +128,7 @@ async function callOpenAI(word, retry = 2) {
 }
 
 // ======================
-// 🧠 安全JSON解析（3.0核心）
+// 🧠 JSON 安全解析（Final）
 // ======================
 function safeParse(text) {
   try {
@@ -180,25 +143,25 @@ function safeParse(text) {
 
     return obj;
 
-  } catch {
+  } catch (e) {
     return null;
   }
 }
 
 // ======================
-// 🚀 关键启动（防Render挂）
+// 🚀 启动服务（关键）
 // ======================
 app.listen(PORT, () => {
-  console.log("🚀 Memory Engine 3.0 running on", PORT);
+  console.log("✅ Memory Engine FINAL running on port", PORT);
 });
 
 // ======================
-// 🧯 防 silent crash
+// 🧯 防崩溃（Production必备）
 // ======================
 process.on("uncaughtException", (err) => {
-  console.log("UNCUGHT:", err);
+  console.log("🔥 uncaughtException:", err);
 });
 
 process.on("unhandledRejection", (err) => {
-  console.log("REJECTION:", err);
+  console.log("🔥 unhandledRejection:", err);
 });
