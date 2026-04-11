@@ -5,137 +5,187 @@ const app = express();
 app.use(express.json());
 
 /**
- * 统一配置（Render 环境变量）
+ * =========================
+ * 1. Provider配置
+ * =========================
  */
-const PROVIDERS = {
-
-
-  deepseek: {
+const providers = [
+  {
+    name: "openai",
+    url: "https://api.openai.com/v1/chat/completions",
+    key: process.env.OPENAI_API_KEY,
+    model: "gpt-4o-mini",
+    headers: (key) => ({
+      Authorization: `Bearer ${key}`,
+      "Content-Type": "application/json",
+    }),
+  },
+  {
+    name: "deepseek",
     url: "https://api.deepseek.com/v1/chat/completions",
     key: process.env.DEEPSEEK_API_KEY,
     model: "deepseek-chat",
     headers: (key) => ({
-      "Authorization": `Bearer ${key}`,
+      Authorization: `Bearer ${key}`,
       "Content-Type": "application/json",
     }),
-    body: (model, prompt) => ({
-      model,
-      messages: [{ role: "user", content: prompt }],
-      temperature: 0.7,
-    }),
   },
-
-  groq: {
+  {
+    name: "groq",
     url: "https://api.groq.com/openai/v1/chat/completions",
     key: process.env.GROQ_API_KEY,
     model: "llama-3.1-70b-versatile",
     headers: (key) => ({
-      "Authorization": `Bearer ${key}`,
+      Authorization: `Bearer ${key}`,
       "Content-Type": "application/json",
     }),
-    body: (model, prompt) => ({
-      model,
-      messages: [{ role: "user", content: prompt }],
-      temperature: 0.7,
-    }),
   },
-
-  openrouter: {
+  {
+    name: "openrouter",
     url: "https://openrouter.ai/api/v1/chat/completions",
     key: process.env.OPENROUTER_API_KEY,
     model: "openai/gpt-4o-mini",
     headers: (key) => ({
-      "Authorization": `Bearer ${key}`,
+      Authorization: `Bearer ${key}`,
       "Content-Type": "application/json",
-      "HTTP-Referer": "https://your-app.com",
-      "X-Title": "word-memory-app",
+      "HTTP-Referer": "https://anki-memory-engine",
+      "X-Title": "anki-memory-engine",
     }),
-    body: (model, prompt) => ({
-      model,
+  },
+];
+
+/**
+ * =========================
+ * 2. Prompt（强约束JSON）
+ * =========================
+ */
+function buildPrompt(word) {
+  return `
+你是一名英语记忆专家 + 儿童教育专家。
+
+请对单词 "${word}" 进行分析，必须输出严格JSON（禁止任何解释、禁止markdown、禁止代码块）：
+
+字段要求：
+- word: 单词
+- split: 拆分记忆（词根/音节）
+- association: 联想故事（生动）
+- bridge: 中文桥接记忆
+- mnemonic: 一句话口诀（越短越好）
+
+只输出JSON，不要多余内容。
+`;
+}
+
+/**
+ * =========================
+ * 3. JSON修复器（关键）
+ * =========================
+ */
+function safeParse(text) {
+  try {
+    return JSON.parse(text);
+  } catch (e) {
+    // 尝试截取 JSON
+    const match = text.match(/\{[\s\S]*\}/);
+    if (match) {
+      try {
+        return JSON.parse(match[0]);
+      } catch (e2) {}
+    }
+  }
+  return { raw: text };
+}
+
+/**
+ * =========================
+ * 4. 调用模型
+ * =========================
+ */
+async function callProvider(provider, prompt) {
+  if (!provider.key) {
+    throw new Error(`NO_KEY:${provider.name}`);
+  }
+
+  const res = await fetch(provider.url, {
+    method: "POST",
+    headers: provider.headers(provider.key),
+    body: JSON.stringify({
+      model: provider.model,
       messages: [{ role: "user", content: prompt }],
       temperature: 0.7,
     }),
-  },
-};
-
-/**
- * 调用 AI
- */
-async function callLLM(provider, prompt) {
-  const cfg = PROVIDERS[provider];
-  if (!cfg) throw new Error("Unknown provider");
-
-  const key = cfg.key;
-  if (!key) throw new Error(`Missing API key for ${provider}`);
-
-  const response = await fetch(cfg.url, {
-    method: "POST",
-    headers: cfg.headers(key),
-    body: JSON.stringify(cfg.body(cfg.model, prompt)),
   });
 
-  const data = await response.json();
+  const data = await res.json();
 
-  if (!data.choices?.[0]?.message?.content) {
-    throw new Error(JSON.stringify(data));
+  const content = data?.choices?.[0]?.message?.content;
+
+  if (!content) {
+    throw new Error(`BAD_RESPONSE:${provider.name}`);
   }
 
-  return data.choices[0].message.content;
+  return content;
 }
 
 /**
- * prompt 生成
+ * =========================
+ * 5. fallback核心逻辑
+ * =========================
  */
-function buildPrompt(word) {
-  return `你是一位英语记忆专家，请对单词：${word} 做教学讲解：
-1. 拆分记忆
-2. 联想记忆
-3. 中文桥接
-4. 一句话口诀
+async function runWithFallback(prompt) {
+  let lastError = null;
 
-请严格输出JSON格式：
-{
-  "word": "",
-  "split": "",
-  "association": "",
-  "bridge": "",
-  "mnemonic": ""
-}`;
+  for (const p of providers) {
+    try {
+      const result = await callProvider(p, prompt);
+      console.log("USED_PROVIDER:", p.name);
+      return result;
+    } catch (err) {
+      console.log("FAILED_PROVIDER:", p.name, err.message);
+      lastError = err;
+      continue;
+    }
+  }
+
+  throw lastError;
 }
 
 /**
- * API
- * /memory?word=apple&provider=openai
+ * =========================
+ * 6. API接口
+ * =========================
  */
 app.get("/memory", async (req, res) => {
   try {
     const word = req.query.word;
-    const provider = req.query.provider || "openai";
 
     if (!word) {
-      return res.status(400).send({ error: "missing word" });
+      return res.status(400).json({ error: "missing word" });
     }
 
     const prompt = buildPrompt(word);
 
-    const result = await callLLM(provider, prompt);
+    const result = await runWithFallback(prompt);
 
-    // 尝试解析 JSON（防止模型输出带代码块）
-    let json;
-    try {
-      json = JSON.parse(result);
-    } catch (e) {
-      json = { raw: result };
-    }
+    const json = safeParse(result);
 
     res.json(json);
   } catch (err) {
-    res.status(500).send({
+    res.status(500).json({
       error: err.message,
     });
   }
 });
 
+/**
+ * =========================
+ * 7. health check
+ * =========================
+ */
+app.get("/", (req, res) => {
+  res.send("AI Memory Engine Running");
+});
+
 app.listen(process.env.PORT || 3000, () => {
-  console.log("Server running...");
+  console.log("Stable AI Engine running...");
 });
