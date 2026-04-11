@@ -156,17 +156,25 @@ async function runWithFallback(prompt) {
  * =========================
  */
 app.get("/memory", async (req, res) => {
-  const word = req.query.word;
+  try {
+    const word = req.query.word;
 
-  if (!word) {
-    return res.status(400).json({ error: "missing word" });
+    if (!word) {
+      return res.status(400).json({ error: "missing word" });
+    }
+
+    const prompt = buildPrompt(word);
+
+    const result = await runWithFallback(prompt);
+
+    const json = safeParse(result);
+
+    res.json(json);
+  } catch (err) {
+    res.status(500).json({
+      error: err.message,
+    });
   }
-
-  const prompt = buildPrompt(word);
-
-  const result = await runWithFallback(prompt);
-
-  res.json(safeParse(result));
 });
 
 /**
