@@ -33,6 +33,16 @@ function prompt(word) {
  */
 function getProviders() {
   return [
+   {
+     name: "zhipuai",
+  url: "https://open.bigmodel.cn/api/paas/v4/chat/completions",
+  key: process.env.ZHIPU_API_KEY,
+  model: "glm-4-flash",
+  headers: (key) => ({
+    Authorization: `Bearer ${key}`,
+    "Content-Type": "application/json",
+      }),
+    },
     {
       name: "openai",
       url: "https://api.openai.com/v1/chat/completions",
