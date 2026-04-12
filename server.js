@@ -3,12 +3,12 @@ import express from "express";
 const app = express();
 app.use(express.json());
 
-const fetchFn = global.fetch;
+const cache = new Map(); // ✅ 简易缓存
 
 // =========================
-// 工具：超时 fetch（核心）
+// 超时 fetch
 // =========================
-async function fetchWithTimeout(url, options = {}, timeout = 12000) {
+async function fetchWithTimeout(url, options = {}, timeout = 10000) {
   const controller = new AbortController();
   const id = setTimeout(() => controller.abort(), timeout);
 
@@ -24,25 +24,13 @@ async function fetchWithTimeout(url, options = {}, timeout = 12000) {
 }
 
 // =========================
-// Prompt（稳定JSON输出）
+// 🔥 超强 Prompt（关键）
 // =========================
 function buildPrompt(word) {
   return `
-你是一名英语记忆专家 + 儿童教育专家。
+你是API服务器，只返回JSON。
 
-请对单词 "${word}" 输出严格JSON（不能有任何多余文字）：
-
-{
-  "word": "${word}",
-  "split": "拆分记忆",
-  "association": "联想故事",
-  "bridge": "中文桥接",
-  "memory": "一句话记忆策略"
-}
-
-你是一个API，只能返回JSON，不能说任何解释。
-
-严格输出以下JSON格式（必须100%合法JSON）：
+必须返回如下格式（不能有任何解释）：
 
 {
   "word": "${word}",
@@ -53,25 +41,22 @@ function buildPrompt(word) {
 }
 
 要求：
-1. 所有字段必须填写
-2. 不允许换行解释
-3. 不允许多余文本
-4. 不允许 markdown
-5. 只返回 JSON
+- 所有字段必须填写
+- 不允许额外文本
+- 不允许markdown
+- 必须是合法JSON
 `;
 }
 
 // =========================
-// provider列表（自动fallback）
+// Provider（稳定排序）
 // =========================
 const providers = [
-{
-  name: "zhipu",
-  url: "https://open.bigmodel.cn/api/paas/v4/chat/completions",
-  key: () => process.env.ZHIPU_API_KEY,
-  model: "glm-4-plus",
-  extraHeaders: {
-    "Content-Type": "application/json"
+  {
+    name: "zhipu",
+    url: "https://open.bigmodel.cn/api/paas/v4/chat/completions",
+    key: () => process.env.ZHIPU_API_KEY,
+    model: "glm-4-plus",
   },
   {
     name: "openai",
@@ -85,96 +70,101 @@ const providers = [
     key: () => process.env.DEEPSEEK_API_KEY,
     model: "deepseek-chat",
   },
-  {
-    name: "groq",
-    url: "https://api.groq.com/openai/v1/chat/completions",
-    key: () => process.env.GROQ_API_KEY,
-    model: "llama-3.1-70b-versatile",
-  },
-  {
-    name: "openrouter",
-    url: "https://openrouter.ai/api/v1/chat/completions",
-    key: () => process.env.OPENROUTER_API_KEY,
-    model: "openai/gpt-4o-mini",
-    extraHeaders: {
-      "HTTP-Referer": "https://anki-memory-engine",
-      "X-Title": "anki-memory-engine",
-    },
-  },
+ 
 ];
 
 // =========================
-// 调用单个模型
+// 调用模型
 // =========================
-async function callModel(provider, word) {
-  const key = provider.key();
-  if (!key) throw new Error("NO_KEY_" + provider.name);
+async function callModel(p, word) {
+  const key = p.key();
+  if (!key) throw new Error("NO_KEY_" + p.name);
 
-  const res = await fetchWithTimeout(provider.url, {
+  const res = await fetchWithTimeout(p.url, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${key}`,
       "Content-Type": "application/json",
-      ...(provider.extraHeaders || {}),
     },
     body: JSON.stringify({
-      model: provider.model,
-      messages: [
-        { role: "user", content: buildPrompt(word) }
-      ],
-      temperature: 0.6,
+      model: p.model,
+      messages: [{ role: "user", content: buildPrompt(word) }],
+      temperature: 0.5,
     }),
   });
 
-  if (!res.ok) {
-    throw new Error(provider.name + "_HTTP_" + res.status);
-  }
+  if (!res.ok) throw new Error(p.name + "_HTTP");
 
   const data = await res.json();
-
-  const content = data?.choices?.[0]?.message?.content;
-
-  if (!content) {
-    throw new Error(provider.name + "_EMPTY");
-  }
-
-  return content;
+  return data?.choices?.[0]?.message?.content || "";
 }
 
 // =========================
-// JSON修复器（关键）
+// JSON修复器（🔥核心）
 // =========================
 function safeParse(text) {
+  if (!text) return null;
+
+  // 1️⃣ 直接解析
   try {
     return JSON.parse(text);
-  } catch {
-    const m = text.match(/\{[\s\S]*\}/);
-    if (m) {
-      try {
-        return JSON.parse(m[0]);
-      } catch {}
-    }
+  } catch {}
+
+  // 2️⃣ 提取 JSON
+  const match = text.match(/\{[\s\S]*\}/);
+  if (match) {
+    try {
+      return JSON.parse(match[0]);
+    } catch {}
   }
+
   return null;
 }
 
 // =========================
-// fallback核心
+// 字段修复（🔥关键）
+// =========================
+function normalize(result, word) {
+  return {
+    word: result?.word || word,
+    split: result?.split || "",
+    association: result?.association || "",
+    bridge: result?.bridge || "",
+    memory: result?.memory || "",
+  };
+}
+
+// =========================
+// 主AI流程（带fallback）
 // =========================
 async function getAI(word) {
+  // ✅ 缓存命中
+  if (cache.has(word)) {
+    return cache.get(word);
+  }
+
   let lastErr = null;
 
   for (const p of providers) {
     try {
       console.log("TRY:", p.name);
-      const result = await callModel(p, word);
 
-      const json = safeParse(result);
-      if (json) return json;
+      const text = await callModel(p, word);
+      const json = safeParse(text);
 
-      throw new Error("PARSE_FAIL_" + p.name);
+      if (json) {
+        const finalData = normalize(json, word);
+
+        // ✅ 写缓存
+        cache.set(word, finalData);
+
+        return finalData;
+      }
+
+      throw new Error("PARSE_FAIL");
+
     } catch (err) {
-      console.log("FAIL:", p.name, err.message);
+      console.log("FAIL:", p.name);
       lastErr = err;
     }
   }
@@ -187,43 +177,40 @@ async function getAI(word) {
 // =========================
 app.get("/memory", async (req, res) => {
   try {
-    const word = req.query.word;
+    const word = (req.query.word || "").trim();
 
     if (!word) {
-      return res.status(400).json({
-        error: "missing_word",
-      });
+      return res.status(400).json({ error: "missing_word" });
     }
 
     const result = await getAI(word);
 
     return res.json({
       success: true,
-  word: result.word || word,
-  split: result.split || "",
-  association: result.association || "",
-  bridge: result.bridge || "",
-  memory: result.memory || "",
+      ...result,
     });
 
   } catch (err) {
     console.error("FINAL_ERROR:", err);
 
-    return res.status(200).json({
+    return res.json({
       success: false,
-      error: "ALL_PROVIDERS_FAILED",
-      memory: "请稍后重试",
+      word: "",
+      split: "",
+      association: "",
+      bridge: "",
+      memory: "记忆生成失败，请稍后再试",
     });
   }
 });
 
 // =========================
 app.get("/", (req, res) => {
-  res.send("V5 AI Engine Running");
+  res.send("V6 Stable AI Running 🚀");
 });
 
 const PORT = process.env.PORT || 3000;
 
 app.listen(PORT, () => {
-  console.log("V5 Stable AI running on", PORT);
+  console.log("V6 running on", PORT);
 });
