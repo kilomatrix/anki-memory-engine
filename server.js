@@ -28,6 +28,18 @@ async function fetchWithTimeout(url, options = {}, timeout = 10000) {
 // =========================
 function buildPrompt(word) {
   return `
+你是一名英语记忆专家 + 儿童教育专家。
+
+请对单词 "${word}" 输出严格JSON（不能有任何多余文字）：
+
+{
+  "word": "${word}",
+  "split": "拆分记忆",
+  "association": "联想故事",
+  "bridge": "中文桥接",
+  "memory": "一句话记忆策略"
+}
+
 你是API服务器，只返回JSON。
 
 必须返回如下格式（不能有任何解释）：
