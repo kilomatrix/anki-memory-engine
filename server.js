@@ -39,6 +39,25 @@ function buildPrompt(word) {
   "bridge": "中文桥接",
   "memory": "一句话记忆策略"
 }
+
+你是一个API，只能返回JSON，不能说任何解释。
+
+严格输出以下JSON格式（必须100%合法JSON）：
+
+{
+  "word": "${word}",
+  "split": "",
+  "association": "",
+  "bridge": "",
+  "memory": ""
+}
+
+要求：
+1. 所有字段必须填写
+2. 不允许换行解释
+3. 不允许多余文本
+4. 不允许 markdown
+5. 只返回 JSON
 `;
 }
 
@@ -180,7 +199,11 @@ app.get("/memory", async (req, res) => {
 
     return res.json({
       success: true,
-      ...result,
+  word: result.word || word,
+  split: result.split || "",
+  association: result.association || "",
+  bridge: result.bridge || "",
+  memory: result.memory || "",
     });
 
   } catch (err) {
