@@ -197,10 +197,18 @@ app.get("/memory", async (req, res) => {
 
     const result = await getAI(word);
 
-    return res.json({
-      success: true,
-      ...result,
-    });
+    const html = `
+<div style="font-size:14px; text-align:left; line-height:1.6; padding:8px;">
+  <div>"word": "${result.word}",</div>
+  <div>"split": "${result.split}",</div>
+  <div>"association": "${result.association}",</div>
+  <div>"bridge": "${result.bridge}",</div>
+  <div>"memory": "${result.memory}"</div>
+</div>
+`;
+
+res.setHeader("Content-Type", "text/html; charset=utf-8");
+return res.send(html);
 
   } catch (err) {
     console.error("FINAL_ERROR:", err);
