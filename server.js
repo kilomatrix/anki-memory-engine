@@ -60,6 +60,22 @@ function buildPrompt(word) {
 `;
 }
 
+
+function sendToAnki(data){
+  window.parent.postMessage(data, "*");
+}
+
+// ⭐ 当AI生成完成时调用
+sendToAnki({
+  word: "{{word}}",
+  split: "ab + andon",
+  association: "ab（离开）",
+  memory: "阿班丢 → 放弃",
+});
+
+
+
+
 // =========================
 // Provider（稳定排序）
 // =========================
