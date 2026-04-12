@@ -53,8 +53,7 @@ const providers = [
   model: "glm-4-plus",
   extraHeaders: {
     "Content-Type": "application/json"
-  }
-
+  },
   {
     name: "openai",
     url: "https://api.openai.com/v1/chat/completions",
