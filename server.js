@@ -41,7 +41,7 @@ function buildPrompt(word) {
 }
 
 要求：
-- 所有字段必须填写
+- 所有字段必须中文填写
 - 不允许额外文本
 - 不允许markdown
 - 必须是合法JSON
