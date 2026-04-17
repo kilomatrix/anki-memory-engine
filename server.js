@@ -61,21 +61,6 @@ function buildPrompt(word) {
 }
 
 
-function sendToAnki(data){
-  window.parent.postMessage(data, "*");
-}
-
-// ⭐ 当AI生成完成时调用
-sendToAnki({
-  word: "{{word}}",
-  split: "ab + andon",
-  association: "ab（离开）",
-  memory: "阿班丢 → 放弃",
-});
-
-
-
-
 // =========================
 // Provider（稳定排序）
 // =========================
@@ -204,6 +189,7 @@ async function getAI(word) {
 // API
 // =========================
 app.get("/memory", async (req, res) => {
+    res.setHeader("Access-Control-Allow-Origin", "*");  // ← 加这行
   try {
     const word = (req.query.word || "").trim();
 
@@ -224,7 +210,7 @@ app.get("/memory", async (req, res) => {
 `;
 
 res.setHeader("Content-Type", "text/html; charset=utf-8");
-return res.send(html);
+return res.json(result);  // 直接返回 result 对象
 
   } catch (err) {
     console.error("FINAL_ERROR:", err);
