@@ -148,6 +148,7 @@ function normalize(result, word) {
     association: result?.association || "",
     bridge: result?.bridge || "",
     memory: result?.memory || "",
+    sentence: result?.sentence || "",  // ← 新增这一行
   };
 }
 
